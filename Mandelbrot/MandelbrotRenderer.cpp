@@ -32,7 +32,7 @@ void MandelbrotRenderer::ProcessStridedPixels(Image img, Bounds bounds, uint32_t
 		std::tie(cr[i], ci[i]) = IndexToCoord(pixIndicies[i], img.w, img.h, bounds);
 
 	// Initialize z and iter values
-	ValuePack<double, 4> zr{ 0.0 }, zi{ 0.0 };
+	ValuePack<double, 4> zr{ cr }, zi{ ci };
 	ValuePack<int32_t, 4> iter { 0 };
 	for (;;)
 	{
@@ -48,6 +48,8 @@ void MandelbrotRenderer::ProcessStridedPixels(Image img, Bounds bounds, uint32_t
 
 		BoolPack tooBig = cmp<GREATER_NAN_TRUE>(sqrt(zr * zr + zi * zi), { 2.0 });
 		BoolPack finished = (iter == maxIter);
+		if (tooBig.None() && finished.None()) continue;
+
 		for (int i = 0; i < 4; i++)
 		{
 			if (tooBig[i] || finished[i])
@@ -64,7 +66,7 @@ void MandelbrotRenderer::ProcessStridedPixels(Image img, Bounds bounds, uint32_t
 				std::tie(cr[i], ci[i]) = IndexToCoord(pixIndicies[i], img.w, img.h, bounds);
 
 				// Reset z and iter values
-				zr[i] = 0.0, zi[i] = 0.0, iter[i] = 0;
+				zr[i] = cr[i], zi[i] = ci[i], iter[i] = 0;
 			}
 		}
 	}

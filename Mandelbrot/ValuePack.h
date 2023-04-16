@@ -18,7 +18,9 @@ enum ComparisonOperator
 	LESS_NAN_TRUE = 0x9,
 	LESS_EQUAL_NAN_TRUE = 0xA,
 	GREATER_NAN_TRUE = 0x6,
-	GREATER_EQUAL_NAN_TRUE = 0x5
+	GREATER_EQUAL_NAN_TRUE = 0x5,
+
+	IS_FINITE = 0x7
 };
 
 #define RETURN_OP_WITH_SIZE(bits, op, type, ...) {\
@@ -106,7 +108,7 @@ inline ValuePack operator##op##(ValuePack other) const\
 }
 
 #define ADD_COMP_OP(op, mmOpName, opCode)\
-BoolPack<PackSize, sizeof(ValTy)> operator##op##(ValuePack other)\
+inline BoolPack<PackSize, sizeof(ValTy)> operator##op##(ValuePack other)\
 {\
 	if constexpr (std::is_integral_v<ValTy>)\
 	{\
@@ -119,7 +121,7 @@ BoolPack<PackSize, sizeof(ValTy)> operator##op##(ValuePack other)\
 }
 
 #define ADD_COMP_OP_SCALAR(op)\
-BoolPack<PackSize, sizeof(ValTy)> operator##op##(ValTy x)\
+inline BoolPack<PackSize, sizeof(ValTy)> operator##op##(ValTy x)\
 {\
 	return (*this) op RepVal(x);\
 }
@@ -159,6 +161,8 @@ protected:
 		std::conditional_t<ElemSize == 2, uint16_t,
 		std::conditional_t<ElemSize == 4, uint32_t, uint64_t>>>;
 
+	static constexpr bool is256 = (NumElem * ElemSize == 32);
+
 public:
 	template<typename PackType>
 	BoolPack(PackType pack)
@@ -167,6 +171,39 @@ public:
 	bool operator[](size_t idx) const
 	{
 		return (bool)d.vals[idx];
+	}
+
+	inline operator bool() const
+	{
+		return All();
+	}
+
+	inline bool All() const
+	{
+		if constexpr (is256)
+		{
+			__m256i& pack = *(__m256i*) & d;
+			return (bool)_mm256_test_all_ones(pack);
+		}
+		else
+		{
+			__m128i& pack = *(__m128i*) & d;
+			return (bool)_mm_test_all_ones(std::bit_cast<__m128i>(d));
+		}
+	}
+
+	inline bool None() const
+	{
+		if constexpr (is256)
+		{
+			__m256i& pack = *(__m256i*) & d;
+			return (bool)_mm256_testz_si256(pack, pack);
+		}
+		else
+		{
+			__m128i& pack = *(__m128i*) & d;
+			return (bool)_mm_testz_si128(pack, pack);
+		}
 	}
 
 protected:
@@ -298,6 +335,9 @@ public:
 		// Types are the same, no conversion necessary
 		if constexpr (std::is_same_v<ValTy, To>) return (*this);
 
+		// Converting (signed -> unsigned) or vice versa
+		if constexpr (std::is_same_v<std::make_unsigned_t<ValTy>, std::make_unsigned_t<To>>) return pack;
+
 		if constexpr (std::is_same_v<ValTy, int8_t>)
 			RETURN_OP(cvtIs256, cvtepi8, To, pack);
 		if constexpr (std::is_same_v<ValTy, uint8_t>)
@@ -327,8 +367,6 @@ public:
 	ADD_OP_METHOD(*, mul);
 	ADD_OP_METHOD(/ , div);
 	ADD_OP_METHOD(%, rem);
-	ADD_OP_METHOD(>> , srav);
-	ADD_OP_METHOD(<< , sllv);
 	ADD_BITWISE_METHOD(&, and);
 	ADD_BITWISE_METHOD(| , or );
 	ADD_BITWISE_METHOD(^, xor);
@@ -339,8 +377,8 @@ public:
 	ADD_IN_PLACE_METHOD(*);
 	ADD_IN_PLACE_METHOD(/ );
 	ADD_IN_PLACE_METHOD(%);
-	ADD_IN_PLACE_METHOD(>> );
 	ADD_IN_PLACE_METHOD(<< );
+	ADD_IN_PLACE_METHOD(>> );
 	ADD_IN_PLACE_METHOD(&);
 	ADD_IN_PLACE_METHOD(| );
 	ADD_IN_PLACE_METHOD(^);
@@ -378,6 +416,60 @@ public:
 	ADD_COMP_OP_SCALAR(>= );
 	ADD_COMP_OP_SCALAR(<= );
 
+	// Shifting
+	inline ValuePack operator<<(ValuePack other) const
+	{
+		using UValTy = std::make_signed_t<ValTy>;
+		RETURN_OP(is256, sllv, UValTy, pack, other.pack);
+	}
+	inline ValuePack operator>>(ValuePack other) const
+	{
+		static_assert(!std::is_same_v<ValTy, int64_t>, "Arithmetic right shift is not supported on signed 64 bit integers in SSE / AVX");
+
+		if constexpr (std::is_unsigned_v<ValTy>)
+		{
+			// epu32, epu64
+			using UValTy = std::make_signed_t<ValTy>;
+			RETURN_OP(is256, srlv, UValTy, pack, other.pack);
+		}
+		else
+		{
+			// epi32
+			RETURN_OP(is256, srav, ValTy, pack, other.pack);
+		}
+	}
+	inline ValuePack operator<<(int x) const
+	{
+		using UValTy = std::make_signed_t<ValTy>;
+		RETURN_OP(is256, slli, UValTy, pack, x);
+	}
+	inline ValuePack operator>>(int x) const
+	{
+		static_assert(!std::is_same_v<ValTy, int64_t>, "Arithmetic right shift is not supported on signed 64 bit integers in SSE / AVX");
+
+		if constexpr (std::is_unsigned_v<ValTy>)
+		{
+			// epu16, epu32, epu64
+			using UValTy = std::make_signed_t<ValTy>;
+			RETURN_OP(is256, srli, UValTy, pack, x);
+		}
+		else
+		{
+			// epi16, epi32
+			RETURN_OP(is256, srai, ValTy, pack, x);
+		}
+	}
+	inline ValuePack& operator<<=(int x)
+	{
+		pack = ((*this) << x).pack;
+		return *this;
+	}
+	inline ValuePack& operator>>=(int x)
+	{
+		pack = ((*this) >> x).pack;
+		return *this;
+	}
+
 	// == Free function friends ==
 	// Trig functions
 	ADD_FREE_FRIEND(sin);
@@ -393,17 +485,28 @@ public:
 	ADD_FREE_FRIEND(log2);
 	ADD_FREE_FRIEND(log10);
 	ADD_FREE_FRIEND(sqrt);
+	ADD_FREE_FRIEND(cbrt);
+	ADD_FREE_FRIEND(invsqrt);
+	ADD_FREE_FRIEND(invsqrt_approx);
+	ADD_FREE_FRIEND(invcbrt);
 	ADD_FREE_FRIEND_2ARG(pow);
 
 	// Other functions
-	ADD_FREE_FRIEND(abs);
-
+	// Rounding
 	ADD_FREE_FRIEND(floor);
 	ADD_FREE_FRIEND(round);
 	ADD_FREE_FRIEND(ceil);
 
+	// Simple
+	ADD_FREE_FRIEND(abs);
 	ADD_FREE_FRIEND_2ARG(min);
 	ADD_FREE_FRIEND_2ARG(max);
+	ADD_FREE_FRIEND_2ARG(avg);
+	ADD_FREE_FRIEND_2ARG(adds);
+	ADD_FREE_FRIEND_2ARG(subs);
+
+	// Special
+	ADD_FREE_FRIEND(erf);
 
 	template <ComparisonOperator op, typename ValTy, size_t PackSize>
 	friend BoolPack<PackSize, sizeof(ValTy)> cmp(ValuePack<ValTy, PackSize> pack1, ValuePack<ValTy, PackSize> pack2);
@@ -419,6 +522,12 @@ ADD_FREE_FUNC(tan, tan);
 ADD_FREE_FUNC(asin, asin);
 ADD_FREE_FUNC(acos, acos);
 ADD_FREE_FUNC(atan, atan);
+ADD_FREE_FUNC(sinh, sinh);
+ADD_FREE_FUNC(cosh, cosh);
+ADD_FREE_FUNC(tanh, tanh);
+ADD_FREE_FUNC(asinh, asinh);
+ADD_FREE_FUNC(acosh, acosh);
+ADD_FREE_FUNC(atanh, atanh);
 
 // Exp functions
 ADD_FREE_FUNC(exp, exp);
@@ -426,20 +535,37 @@ ADD_FREE_FUNC(log, log);
 ADD_FREE_FUNC(log2, log2);
 ADD_FREE_FUNC(log10, log10);
 ADD_FREE_FUNC(sqrt, sqrt);
+ADD_FREE_FUNC(cbrt, cbrt);
+ADD_FREE_FUNC(invsqrt, invsqrt);
+ADD_FREE_FUNC(invsqrt_approx, rsqrt);
+ADD_FREE_FUNC(invcbrt, invcbrt);
 ADD_FREE_FUNC_2ARG(pow, pow);
 
 // Other functions
-ADD_FREE_FUNC(abs, abs);
-
+// Rounding
 ADD_FREE_FUNC(floor, floor);
 ADD_FREE_FUNC(round, round);
 ADD_FREE_FUNC(ceil, ceil);
 
+// Simple
+ADD_FREE_FUNC(abs, abs);
 ADD_FREE_FUNC_2ARG(min, min);
 ADD_FREE_FUNC_2ARG(max, max);
+ADD_FREE_FUNC_2ARG(avg, avg);
+ADD_FREE_FUNC_2ARG(adds, adds);
+ADD_FREE_FUNC_2ARG(subs, subs);
+
+// Special
+ADD_FREE_FUNC(erf, erf);
+
+template <typename ValTy, size_t PackSize>
+inline BoolPack<PackSize, sizeof(ValTy)> isfinite(ValuePack<ValTy, PackSize> pack)
+{
+	return cmp<IS_FINITE>(pack, pack);
+}
 
 template <ComparisonOperator op, typename ValTy, size_t PackSize>
-BoolPack<PackSize, sizeof(ValTy)> cmp(ValuePack<ValTy, PackSize> pack1, ValuePack<ValTy, PackSize> pack2)
+inline BoolPack<PackSize, sizeof(ValTy)> cmp(ValuePack<ValTy, PackSize> pack1, ValuePack<ValTy, PackSize> pack2)
 {
 	RETURN_OP(pack1.is256, cmp, ValTy, pack1.pack, pack2.pack, op);
 }
